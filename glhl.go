@@ -80,6 +80,12 @@ func newContext(major, minor int, flags Flag, sharedWith C.EGLContext) (ctx Cont
 	return ctx, nil
 }
 
+func (ctx Context) Destroy() {
+	if C.eglDestroyContext(ctx.dpy, ctx.ctx) == 0 {
+		panic(Error(C.eglGetError()))
+	}
+}
+
 func (ctx Context) MakeCurrent() {
 	noSurf := C.EGLSurface(C.EGL_NO_SURFACE)
 	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, ctx.ctx) == 0 {
@@ -96,6 +102,7 @@ func GetProcAddr(name string) unsafe.Pointer {
 type Error int
 
 func (err Error) Error() string {
+	var str string
 	switch err {
 	case -1:
 		str = "no matching config"
@@ -128,7 +135,7 @@ func (err Error) Error() string {
 	case C.EGL_CONTEXT_LOST:
 		str = "context lost"
 	default:
-		return fmt.Sprintf("unknown EGL error: %d", code)
+		return fmt.Sprintf("unknown EGL error: %d", err)
 	}
 	return "EGL error: " + str
 }
