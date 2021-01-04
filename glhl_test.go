@@ -8,7 +8,7 @@ func TestNewContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ctx.Destroy()
-	ctx.MakeCurrent()
+	ctx.MakeContextCurrent()
 }
 
 func TestNewSharedContext(t *testing.T) {
@@ -17,12 +17,12 @@ func TestNewSharedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ctx.Destroy()
-	ctx.MakeCurrent()
+	ctx.MakeContextCurrent()
 
 	ctx2, err := NewSharedContext(3, 3, 0, ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ctx2.Destroy()
-	ctx2.MakeCurrent()
+	ctx2.MakeContextCurrent()
 }
