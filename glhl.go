@@ -93,11 +93,20 @@ func (ctx Context) Destroy() {
 	}
 }
 
+var noSurf = C.EGLSurface(C.EGL_NO_SURFACE)
+
 // MakeContextCurrent activates the context, making it the new current OpenGL context.
 // gl.InitWithProcAddrFunc should be called with GetProcAddr after calling this function.
 func (ctx Context) MakeContextCurrent() {
-	noSurf := C.EGLSurface(C.EGL_NO_SURFACE)
 	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, ctx.ctx) == 0 {
+		panic(Error(C.eglGetError()))
+	}
+}
+
+// Release deactivates the context, making it available for use in other threads.
+// May only be called after a matching call MakeContextCurrent.
+func (ctx Context) Release() {
+	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, C.EGLContext(C.EGL_NO_CONTEXT)) == 0 {
 		panic(Error(C.eglGetError()))
 	}
 }
