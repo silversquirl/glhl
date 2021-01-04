@@ -41,36 +41,42 @@ import (
 	"unsafe"
 )
 
+// Flags to NewContext and NewSharedContext.
+// If neither Core nor Compatibility is provided, the default will be Core.
 type Flag int
 
 const (
-	Core Flag = 1 << iota
-	Compatibility
-	Debug
+	Core          Flag = 1 << iota // Allow core profile
+	Compatibility                  // Allow compatibility profile
+	Debug                          // Use debug context
 )
 
+// Context represents a headless OpenGL context
 type Context struct {
 	dpy C.EGLDisplay
 	ctx C.EGLContext
 }
 
+// NewContext creates a new context with the specified version and flags.
 func NewContext(major, minor int, flags Flag) (Context, error) {
 	return newContext(major, minor, flags, C.EGLContext(C.EGL_NO_CONTEXT))
 }
+
+// NewSharedContext creates a new context with the specified version and flags, that shares state with another context.
+// See the chapter named "Shared Objects and Multiple Contexts" in the OpenGL specification for more information.
 func NewSharedContext(major, minor int, flags Flag, sharedWith Context) (Context, error) {
 	return newContext(major, minor, flags, sharedWith.ctx)
 }
+
 func newContext(major, minor int, flags Flag, sharedWith C.EGLContext) (ctx Context, err error) {
-	if flags == 0 {
-		flags = Core
-	}
 	profile := C.int(0)
-	if flags&Core != 0 {
-		profile |= C.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT
-	}
 	if flags&Compatibility != 0 {
 		profile |= C.EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT
 	}
+	if flags&Core != 0 || profile == 0 {
+		profile |= C.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT
+	}
+
 	debug := C._Bool(flags&Debug != 0)
 
 	code := C.glhlNewContext(C.int(major), C.int(minor), profile, debug, &ctx.dpy, &ctx.ctx, sharedWith)
@@ -80,12 +86,15 @@ func newContext(major, minor int, flags Flag, sharedWith C.EGLContext) (ctx Cont
 	return ctx, nil
 }
 
+// Destroy cleans up the state surrounding a context
 func (ctx Context) Destroy() {
 	if C.eglDestroyContext(ctx.dpy, ctx.ctx) == 0 {
 		panic(Error(C.eglGetError()))
 	}
 }
 
+// MakeContextCurrent activates the context, making it the new current OpenGL context.
+// gl.InitWithProcAddrFunc should be called with GetProcAddr after calling this function.
 func (ctx Context) MakeContextCurrent() {
 	noSurf := C.EGLSurface(C.EGL_NO_SURFACE)
 	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, ctx.ctx) == 0 {
@@ -93,12 +102,14 @@ func (ctx Context) MakeContextCurrent() {
 	}
 }
 
+// GetProcAddr gets the address of an OpenGL function. For use with gl.InitWithProcAddrFunc
 func GetProcAddr(name string) unsafe.Pointer {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 	return unsafe.Pointer(C.eglGetProcAddress(cname))
 }
 
+// Error represents context initialization error
 type Error int
 
 func (err Error) Error() string {
