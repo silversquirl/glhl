@@ -86,7 +86,7 @@ func (ctx Context) Destroy() {
 	}
 }
 
-func (ctx Context) MakeCurrent() {
+func (ctx Context) MakeContextCurrent() {
 	noSurf := C.EGLSurface(C.EGL_NO_SURFACE)
 	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, ctx.ctx) == 0 {
 		panic(Error(C.eglGetError()))
