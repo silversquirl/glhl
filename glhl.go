@@ -5,6 +5,7 @@ package glhl
 #cgo LDFLAGS: -lEGL
 #include <stdlib.h>
 #include <EGL/egl.h>
+
 const EGLint _glhlConfigAttr[] = {
 	EGL_CONFIG_CAVEAT, EGL_NONE,         // Require hardware acceleration
 	EGL_CONFORMANT, EGL_OPENGL_BIT,      // Require OpenGL conformance
@@ -30,6 +31,14 @@ int glhlNewContext(int major, int minor, int profile, _Bool debug, EGLDisplay *d
 	};
 	*ctx = eglCreateContext(*dpy, conf, sharedWith, ctxAttr);
 
+error:
+	return eglGetError();
+}
+
+int glhlMakeContextCurrent(EGLDisplay *dpy, EGLContext *ctx) {
+	if (!eglBindAPI(EGL_OPENGL_API)) goto error;
+	if (!eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) goto error;
+	return EGL_SUCCESS;
 error:
 	return eglGetError();
 }
@@ -93,20 +102,18 @@ func (ctx Context) Destroy() {
 	}
 }
 
-var noSurf = C.EGLSurface(C.EGL_NO_SURFACE)
-
 // MakeContextCurrent activates the context, making it the new current OpenGL context.
 // gl.InitWithProcAddrFunc should be called with GetProcAddr after calling this function.
 func (ctx Context) MakeContextCurrent() {
-	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, ctx.ctx) == 0 {
-		panic(Error(C.eglGetError()))
+	code = C.glhlMakeContextCurrent(ctx.dpy, ctx.ctx)
+	if code != C.EGL_SUCCESS {
+		panic(Error(code))
 	}
 }
 
-// Release deactivates the context, making it available for use in other threads.
-// May only be called after a matching call MakeContextCurrent.
-func (ctx Context) Release() {
-	if C.eglMakeCurrent(ctx.dpy, noSurf, noSurf, C.EGLContext(C.EGL_NO_CONTEXT)) == 0 {
+// Release deactivates the current context, making it available for use in other threads.
+func Release() {
+	if C.eglReleaseThread() == 0 {
 		panic(Error(C.eglGetError()))
 	}
 }
