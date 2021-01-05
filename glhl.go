@@ -35,7 +35,7 @@ error:
 	return eglGetError();
 }
 
-int glhlMakeContextCurrent(EGLDisplay *dpy, EGLContext *ctx) {
+int glhlMakeContextCurrent(EGLDisplay dpy, EGLContext ctx) {
 	if (!eglBindAPI(EGL_OPENGL_API)) goto error;
 	if (!eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) goto error;
 	return EGL_SUCCESS;
@@ -105,7 +105,7 @@ func (ctx Context) Destroy() {
 // MakeContextCurrent activates the context, making it the new current OpenGL context.
 // gl.InitWithProcAddrFunc should be called with GetProcAddr after calling this function.
 func (ctx Context) MakeContextCurrent() {
-	code = C.glhlMakeContextCurrent(ctx.dpy, ctx.ctx)
+	code := C.glhlMakeContextCurrent(ctx.dpy, ctx.ctx)
 	if code != C.EGL_SUCCESS {
 		panic(Error(code))
 	}
