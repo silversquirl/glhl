@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"unsafe"
 )
@@ -26,8 +27,22 @@ func initPlatform(ctx *Context) error {
 		return ErrUnsupported
 	}
 
+	cards, err := filepath.Glob("/dev/dri/card*")
+	if err != nil {
+		return err
+	}
+	for _, card := range cards {
+		err = initGBM(ctx, card)
+		if err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func initGBM(ctx *Context, path string) error {
 	var err error
-	ctx.gbmf, err = os.OpenFile("/dev/dri/card0", os.O_RDWR, 0) // FIXME: don't indiscriminately use card0
+	ctx.gbmf, err = os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
