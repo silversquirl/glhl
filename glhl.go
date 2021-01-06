@@ -2,11 +2,9 @@
 package glhl
 
 /*
-#cgo LDFLAGS: -lEGL -lgbm
+#cgo LDFLAGS: -lEGL
 #include <stdlib.h>
-#include <string.h>
 #include <EGL/egl.h>
-#include <gbm.h>
 
 int glhlMakeContextCurrent(EGLDisplay dpy, EGLContext ctx) {
 	if (!eglBindAPI(EGL_OPENGL_API)) goto error;
@@ -21,8 +19,6 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"unsafe"
 )
 
@@ -38,18 +34,15 @@ const (
 
 // Context represents a headless OpenGL context
 type Context struct {
-	dpy  C.EGLDisplay
-	ctx  C.EGLContext
-	gbm  *C.struct_gbm_device
-	gbmf *os.File
+	dpy C.EGLDisplay
+	ctx C.EGLContext
+	platformContext
 }
 
 // NewContext creates a new context with the specified version and flags.
 func NewContext(major, minor int, flags Flag) (Context, error) {
 	return newContext(major, minor, flags)
 }
-
-const egl_PLATFORM_GBM_MESA C.EGLenum = 0x31D7
 
 func initGeneric(ctx *Context) error {
 	ctx.dpy = C.eglGetDisplay(C.EGL_DEFAULT_DISPLAY)
@@ -62,40 +55,9 @@ func initGeneric(ctx *Context) error {
 	return nil
 }
 
-func initGBM(ctx *Context) error {
-	ext := C.eglQueryString(C.EGLDisplay(C.EGL_NO_DISPLAY), C.EGL_EXTENSIONS)
-	if ext == nil || !strings.Contains(C.GoString(ext), "EGL_MESA_platform_gbm") {
-		return ErrUnsupported
-	}
-
-	var err error
-	ctx.gbmf, err = os.OpenFile("/dev/dri/card0", os.O_RDWR, 0) // FIXME: don't indiscriminately use card0
-	if err != nil {
-		return err
-	}
-	ctx.gbm = C.gbm_create_device(C.int(ctx.gbmf.Fd()))
-	if ctx.gbm == nil {
-		ctx.gbmf.Close()
-		return ErrGBM
-	}
-
-	ctx.dpy = C.eglGetPlatformDisplay(egl_PLATFORM_GBM_MESA, unsafe.Pointer(ctx.gbm), nil)
-	if ctx.dpy == C.EGLDisplay(C.EGL_NO_DISPLAY) {
-		C.gbm_device_destroy(ctx.gbm)
-		ctx.gbmf.Close()
-		return ErrNoDisplay
-	}
-
-	if C.eglInitialize(ctx.dpy, nil, nil) == 0 {
-		return fmt.Errorf("eglInitialize: %w", eglError())
-	}
-
-	return nil
-}
-
 func newContext(major, minor int, flags Flag) (ctx Context, err error) {
 	if err := initGeneric(&ctx); err != nil {
-		if initGBM(&ctx) != nil {
+		if initPlatform(&ctx) != nil {
 			return Context{}, err
 		}
 	}
@@ -103,13 +65,16 @@ func newContext(major, minor int, flags Flag) (ctx Context, err error) {
 	var nconf C.EGLint
 	var conf C.EGLConfig
 	if C.eglChooseConfig(ctx.dpy, &configAttr[0], &conf, 1, &nconf) == 0 {
+		ctx.platformContext.Destroy()
 		return Context{}, fmt.Errorf("eglChooseConfig: %w", eglError())
 	}
 	if nconf < 1 {
+		ctx.platformContext.Destroy()
 		return Context{}, ErrNoConfig
 	}
 
 	if C.eglBindAPI(C.EGL_OPENGL_API) == 0 {
+		ctx.platformContext.Destroy()
 		return Context{}, fmt.Errorf("eglBindAPI: %w", eglError())
 	}
 
@@ -132,8 +97,10 @@ func newContext(major, minor int, flags Flag) (ctx Context, err error) {
 
 	ctx.ctx = C.eglCreateContext(ctx.dpy, conf, C.EGLContext(C.EGL_NO_CONTEXT), &ctxAttr[0]) // TODO: shared contexts
 	if err := eglError(); err != nil {
+		ctx.platformContext.Destroy()
 		return Context{}, fmt.Errorf("eglCreateContext: %w", err)
 	}
+
 	return ctx, nil
 }
 
@@ -149,10 +116,7 @@ func (ctx Context) Destroy() {
 	if C.eglDestroyContext(ctx.dpy, ctx.ctx) == 0 {
 		panic(Error(C.eglGetError()))
 	}
-	if ctx.gbm != nil {
-		C.gbm_device_destroy(ctx.gbm)
-		ctx.gbmf.Close()
-	}
+	ctx.platformContext.Destroy()
 }
 
 // MakeContextCurrent activates the context, making it the new current OpenGL context.
@@ -228,4 +192,3 @@ func (err Error) Error() string {
 var ErrNoDisplay = errors.New("No valid EGL display")
 var ErrNoConfig = errors.New("No valid EGL config")
 var ErrUnsupported = errors.New("Extension is unsupported")
-var ErrGBM = errors.New("GBM error")
