@@ -2,38 +2,11 @@
 package glhl
 
 /*
-#cgo LDFLAGS: -lEGL
+#cgo LDFLAGS: -lEGL -lgbm
 #include <stdlib.h>
+#include <string.h>
 #include <EGL/egl.h>
-
-const EGLint _glhlConfigAttr[] = {
-	EGL_CONFIG_CAVEAT, EGL_NONE,         // Require hardware acceleration
-	EGL_CONFORMANT, EGL_OPENGL_BIT,      // Require OpenGL conformance
-	EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, // Require OpenGL support
-	EGL_NONE
-};
-int glhlNewContext(int major, int minor, int profile, _Bool debug, EGLDisplay *dpy, EGLContext *ctx, EGLContext sharedWith) {
-	*dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-	if (!eglInitialize(*dpy, NULL, NULL)) goto error;
-
-	EGLint nconf;
-	EGLConfig conf;
-	if (!eglChooseConfig(*dpy, _glhlConfigAttr, &conf, 1, &nconf)) goto error;
-	if (nconf < 1) return -1;
-
-	if (!eglBindAPI(EGL_OPENGL_API)) goto error;
-	EGLint ctxAttr[] = {
-		EGL_CONTEXT_MAJOR_VERSION, major,
-		EGL_CONTEXT_MINOR_VERSION, minor,
-		EGL_CONTEXT_OPENGL_PROFILE_MASK, profile,
-		EGL_CONTEXT_OPENGL_DEBUG, debug,
-		EGL_NONE
-	};
-	*ctx = eglCreateContext(*dpy, conf, sharedWith, ctxAttr);
-
-error:
-	return eglGetError();
-}
+#include <gbm.h>
 
 int glhlMakeContextCurrent(EGLDisplay dpy, EGLContext ctx) {
 	if (!eglBindAPI(EGL_OPENGL_API)) goto error;
@@ -46,7 +19,10 @@ error:
 import "C"
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"unsafe"
 )
 
@@ -62,43 +38,120 @@ const (
 
 // Context represents a headless OpenGL context
 type Context struct {
-	dpy C.EGLDisplay
-	ctx C.EGLContext
+	dpy  C.EGLDisplay
+	ctx  C.EGLContext
+	gbm  *C.struct_gbm_device
+	gbmf *os.File
 }
 
 // NewContext creates a new context with the specified version and flags.
 func NewContext(major, minor int, flags Flag) (Context, error) {
-	return newContext(major, minor, flags, C.EGLContext(C.EGL_NO_CONTEXT))
+	return newContext(major, minor, flags)
 }
 
-// NewSharedContext creates a new context with the specified version and flags, that shares state with another context.
-// See the chapter named "Shared Objects and Multiple Contexts" in the OpenGL specification for more information.
-func NewSharedContext(major, minor int, flags Flag, sharedWith Context) (Context, error) {
-	return newContext(major, minor, flags, sharedWith.ctx)
+const egl_PLATFORM_GBM_MESA C.EGLenum = 0x31D7
+
+func initGeneric(ctx *Context) error {
+	ctx.dpy = C.eglGetDisplay(C.EGL_DEFAULT_DISPLAY)
+	if ctx.dpy == C.EGLDisplay(C.EGL_NO_DISPLAY) {
+		return ErrNoDisplay
+	}
+	if C.eglInitialize(ctx.dpy, nil, nil) == 0 {
+		return fmt.Errorf("eglInitialize: %w", eglError())
+	}
+	return nil
 }
 
-func newContext(major, minor int, flags Flag, sharedWith C.EGLContext) (ctx Context, err error) {
-	profile := C.int(0)
+func initGBM(ctx *Context) error {
+	ext := C.eglQueryString(C.EGLDisplay(C.EGL_NO_DISPLAY), C.EGL_EXTENSIONS)
+	if ext == nil || !strings.Contains(C.GoString(ext), "EGL_MESA_platform_gbm") {
+		return ErrUnsupported
+	}
+
+	var err error
+	ctx.gbmf, err = os.OpenFile("/dev/dri/card0", os.O_RDWR, 0) // FIXME: don't indiscriminately use card0
+	if err != nil {
+		return err
+	}
+	ctx.gbm = C.gbm_create_device(C.int(ctx.gbmf.Fd()))
+	if ctx.gbm == nil {
+		ctx.gbmf.Close()
+		return ErrGBM
+	}
+
+	ctx.dpy = C.eglGetPlatformDisplay(egl_PLATFORM_GBM_MESA, unsafe.Pointer(ctx.gbm), nil)
+	if ctx.dpy == C.EGLDisplay(C.EGL_NO_DISPLAY) {
+		C.gbm_device_destroy(ctx.gbm)
+		ctx.gbmf.Close()
+		return ErrNoDisplay
+	}
+
+	if C.eglInitialize(ctx.dpy, nil, nil) == 0 {
+		return fmt.Errorf("eglInitialize: %w", eglError())
+	}
+
+	return nil
+}
+
+func newContext(major, minor int, flags Flag) (ctx Context, err error) {
+	if err := initGeneric(&ctx); err != nil {
+		if initGBM(&ctx) != nil {
+			return Context{}, err
+		}
+	}
+
+	var nconf C.EGLint
+	var conf C.EGLConfig
+	if C.eglChooseConfig(ctx.dpy, &configAttr[0], &conf, 1, &nconf) == 0 {
+		return Context{}, fmt.Errorf("eglChooseConfig: %w", eglError())
+	}
+	if nconf < 1 {
+		return Context{}, ErrNoConfig
+	}
+
+	if C.eglBindAPI(C.EGL_OPENGL_API) == 0 {
+		return Context{}, fmt.Errorf("eglBindAPI: %w", eglError())
+	}
+
+	var profile C.EGLint
 	if flags&Compatibility != 0 {
 		profile |= C.EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT
 	}
 	if flags&Core != 0 || profile == 0 {
 		profile |= C.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT
 	}
+	ctxAttr := []C.EGLint{
+		C.EGL_CONTEXT_MAJOR_VERSION, C.EGLint(major),
+		C.EGL_CONTEXT_MINOR_VERSION, C.EGLint(minor),
+		C.EGL_CONTEXT_OPENGL_PROFILE_MASK, profile,
+	}
+	if flags&Debug != 0 {
+		ctxAttr = append(ctxAttr, C.EGL_CONTEXT_OPENGL_DEBUG, 1)
+	}
+	ctxAttr = append(ctxAttr, C.EGL_NONE)
 
-	debug := C._Bool(flags&Debug != 0)
-
-	code := C.glhlNewContext(C.int(major), C.int(minor), profile, debug, &ctx.dpy, &ctx.ctx, sharedWith)
-	if code != C.EGL_SUCCESS {
-		return Context{}, Error(code)
+	ctx.ctx = C.eglCreateContext(ctx.dpy, conf, C.EGLContext(C.EGL_NO_CONTEXT), &ctxAttr[0]) // TODO: shared contexts
+	if err := eglError(); err != nil {
+		return Context{}, fmt.Errorf("eglCreateContext: %w", err)
 	}
 	return ctx, nil
+}
+
+var configAttr = []C.EGLint{
+	C.EGL_CONFIG_CAVEAT, C.EGL_NONE, // Require hardware acceleration
+	C.EGL_CONFORMANT, C.EGL_OPENGL_BIT, // Require OpenGL conformance
+	C.EGL_RENDERABLE_TYPE, C.EGL_OPENGL_BIT, // Require OpenGL support
+	C.EGL_NONE,
 }
 
 // Destroy cleans up the state surrounding a context
 func (ctx Context) Destroy() {
 	if C.eglDestroyContext(ctx.dpy, ctx.ctx) == 0 {
 		panic(Error(C.eglGetError()))
+	}
+	if ctx.gbm != nil {
+		C.gbm_device_destroy(ctx.gbm)
+		ctx.gbmf.Close()
 	}
 }
 
@@ -125,44 +178,54 @@ func GetProcAddr(name string) unsafe.Pointer {
 	return unsafe.Pointer(C.eglGetProcAddress(cname))
 }
 
+func eglError() error {
+	code := C.eglGetError()
+	if code == C.EGL_SUCCESS {
+		return nil
+	} else {
+		return Error(code)
+	}
+}
+
 // Error represents context initialization error
 type Error int
 
 func (err Error) Error() string {
-	var str string
 	switch err {
-	case -1:
-		str = "no matching config"
 	case C.EGL_NOT_INITIALIZED:
-		str = "not initialized"
+		return "not initialized"
 	case C.EGL_BAD_ACCESS:
-		str = "bad access"
+		return "bad access"
 	case C.EGL_BAD_ALLOC:
-		str = "bad alloc"
+		return "bad alloc"
 	case C.EGL_BAD_ATTRIBUTE:
-		str = "bad attribute"
+		return "bad attribute"
 	case C.EGL_BAD_CONFIG:
-		str = "bad config"
+		return "bad config"
 	case C.EGL_BAD_CONTEXT:
-		str = "bad context"
+		return "bad context"
 	case C.EGL_BAD_CURRENT_SURFACE:
-		str = "bad current surface"
+		return "bad current surface"
 	case C.EGL_BAD_DISPLAY:
-		str = "bad display"
+		return "bad display"
 	case C.EGL_BAD_MATCH:
-		str = "bad match"
+		return "bad match"
 	case C.EGL_BAD_NATIVE_PIXMAP:
-		str = "bad native pixmap"
+		return "bad native pixmap"
 	case C.EGL_BAD_NATIVE_WINDOW:
-		str = "bad native window"
+		return "bad native window"
 	case C.EGL_BAD_PARAMETER:
-		str = "bad parameter"
+		return "bad parameter"
 	case C.EGL_BAD_SURFACE:
-		str = "bad surface"
+		return "bad surface"
 	case C.EGL_CONTEXT_LOST:
-		str = "context lost"
+		return "context lost"
 	default:
-		return fmt.Sprintf("unknown EGL error: %d", err)
+		return fmt.Sprintf("unknown error: %d", err)
 	}
-	return "EGL error: " + str
 }
+
+var ErrNoDisplay = errors.New("No valid EGL display")
+var ErrNoConfig = errors.New("No valid EGL config")
+var ErrUnsupported = errors.New("Extension is unsupported")
+var ErrGBM = errors.New("GBM error")
